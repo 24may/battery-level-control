@@ -47,4 +47,7 @@ jobs:
           TUYA_DEVICE_ID: ${{ secrets.TUYA_DEVICE_ID }}
           TUYA_SWITCH_CODE: ${{ secrets.TUYA_SWITCH_CODE || 'switch_1' }}
           TUYA_HOST: ${{ vars.TUYA_HOST || 'https://openapi.tuyaeu.com' }}
+          # "Re-run jobs → Enable debug logging" in the Actions UI switches to DEBUG;
+          # otherwise use the LOG_LEVEL repo variable, defaulting to INFO.
+          LOG_LEVEL: ${{ runner.debug == '1' && 'DEBUG' || vars.LOG_LEVEL || 'INFO' }}
         run: python ecoflow_delta2_status1.py
