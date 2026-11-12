@@ -19,6 +19,7 @@ import hmac
 import json
 import os
 import random
+import re
 import sys
 import time
 
@@ -58,6 +59,23 @@ def charge_level(data):
         if isinstance(val, (int, float)) or (isinstance(val, str) and val.replace(".", "", 1).isdigit()):
             return round(float(val), 1), key
     return None, None
+
+
+def extra_battery_socs(all_data):
+    """Find per-battery SoC values in a full quota dump beyond the main summary keys.
+
+    An add-on / extra battery reports its own SoC under a device-specific key
+    (varies by model and firmware), so instead of hardcoding we scan every key
+    ending in 'soc' that holds a plausible percentage and isn't already shown in
+    the main summary. Returns a list of (key, value) sorted by key.
+    """
+    found = []
+    for key, val in sorted(all_data.items()):
+        if key in BATTERY_QUOTAS or key in SOC_KEYS:
+            continue
+        if re.search(r"soc$", key, re.IGNORECASE) and isinstance(val, (int, float)) and 0 <= val <= 100:
+            found.append((key, val))
+    return found
 
 
 def charge_bar(pct, width=20):
@@ -152,6 +170,13 @@ def main():
     for key, (label, unit) in BATTERY_QUOTAS.items():
         val = data.get(key, "n/a")
         print(f"  {label:<28} {val} {unit}".rstrip())
+
+    # Extra / add-on batteries: discover any other SoC values the device reports.
+    extras = extra_battery_socs(get_all_quota(sn))
+    if extras:
+        print("\nOther battery SoC values detected (likely add-on batteries):")
+        for key, val in extras:
+            print(f"  {key:<32} {val:g} %")
 
 
 if __name__ == "__main__":
