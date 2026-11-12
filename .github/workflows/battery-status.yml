@@ -1,0 +1,40 @@
+name: EcoFlow battery status
+
+on:
+  schedule:
+    # Twice an hour, at :00 and :30. Note: GitHub may delay scheduled
+    # runs under load, and disables the schedule after 60 days with no
+    # repo activity. Only schedules on the default branch run.
+    - cron: "0,30 * * * *"
+  workflow_dispatch: {}   # allow manual runs from the Actions tab
+
+# Avoid overlapping runs if one is delayed/queued.
+concurrency:
+  group: battery-status
+  cancel-in-progress: false
+
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Read battery status
+        env:
+          ECOFLOW_ACCESS_KEY: ${{ secrets.ECOFLOW_ACCESS_KEY }}
+          ECOFLOW_SECRET_KEY: ${{ secrets.ECOFLOW_SECRET_KEY }}
+          ECOFLOW_SN: ${{ vars.ECOFLOW_SN }}        # optional; blank = first bound device
+          # Fallback here, not in the script: an unset repo var arrives as "" and
+          # os.getenv's default would not kick in, leaving the host empty.
+          ECOFLOW_HOST: ${{ vars.ECOFLOW_HOST || 'https://api-e.ecoflow.com' }}
+        run: python ecoflow_delta2_status1.py
