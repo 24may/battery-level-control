@@ -172,7 +172,13 @@ def main():
         print(f"  {label:<28} {val} {unit}".rstrip())
 
     # Extra / add-on batteries: discover any other SoC values the device reports.
-    extras = extra_battery_socs(get_all_quota(sn))
+    # This relies on the quota/all endpoint; if it fails (e.g. EcoFlow rejects the
+    # request), degrade gracefully rather than losing the main status above.
+    try:
+        extras = extra_battery_socs(get_all_quota(sn))
+    except Exception as e:  # noqa: BLE001 - optional lookup must never crash the run
+        print(f"\n(Extra-battery lookup skipped: {e})")
+        extras = []
     if extras:
         print("\nOther battery SoC values detected (likely add-on batteries):")
         for key, val in extras:
