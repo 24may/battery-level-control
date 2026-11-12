@@ -17,6 +17,9 @@ jobs:
   status:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # Environment that holds the TUYA_* secrets (Settings → Environments → tuya).
+    # Repo-level secrets/vars stay available alongside the environment's ones.
+    environment: tuya
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
@@ -37,4 +40,11 @@ jobs:
           # Fallback here, not in the script: an unset repo var arrives as "" and
           # os.getenv's default would not kick in, leaving the host empty.
           ECOFLOW_HOST: ${{ vars.ECOFLOW_HOST || 'https://api-e.ecoflow.com' }}
+          # Tuya smart plug: switched OFF when PD SoC reaches 100%.
+          # Leave CLIENT_ID/SECRET/DEVICE_ID unset to disable plug control.
+          TUYA_CLIENT_ID: ${{ secrets.TUYA_CLIENT_ID }}
+          TUYA_SECRET: ${{ secrets.TUYA_SECRET }}
+          TUYA_DEVICE_ID: ${{ secrets.TUYA_DEVICE_ID }}
+          TUYA_SWITCH_CODE: ${{ secrets.TUYA_SWITCH_CODE || 'switch_1' }}
+          TUYA_HOST: ${{ vars.TUYA_HOST || 'https://openapi.tuyaeu.com' }}
         run: python ecoflow_delta2_status1.py

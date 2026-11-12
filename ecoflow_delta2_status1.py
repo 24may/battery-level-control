@@ -9,6 +9,13 @@ Setup:
     export ECOFLOW_SN=R331...          # Delta 2 serial number (optional; else first device)
     export ECOFLOW_HOST=https://api-e.ecoflow.com   # EU account; use https://api.ecoflow.com for US/global
 
+    # Optional: Tuya smart plug that is switched OFF when PD SoC reaches 100%
+    export TUYA_CLIENT_ID=...          # Tuya IoT cloud project Access ID
+    export TUYA_SECRET=...             # Tuya IoT cloud project Access Secret
+    export TUYA_DEVICE_ID=...          # plug device ID
+    export TUYA_HOST=https://openapi.tuyaeu.com    # data center of the cloud project
+    export TUYA_SWITCH_CODE=switch_1   # DP code of the relay (default switch_1)
+
 Usage:
     python ecoflow_delta2_status.py          # battery summary
     python ecoflow_delta2_status.py --all    # dump every quota key (to discover names)
@@ -22,12 +29,24 @@ import random
 import re
 import sys
 import time
+import uuid
 
 import requests
 
 HOST = os.getenv("ECOFLOW_HOST", "https://api-e.ecoflow.com")
 ACCESS_KEY = os.environ["ECOFLOW_ACCESS_KEY"]
 SECRET_KEY = os.environ["ECOFLOW_SECRET_KEY"]
+
+# Tuya smart plug (optional). When all three are set, the plug is switched off
+# once PD SoC reaches 100%. Leave them unset to disable plug control.
+# Values come from GitHub environment secrets in CI (see .github/workflows/battery-status.yml).
+# `or` instead of a getenv default: an unset GitHub secret arrives as "" not as missing.
+TUYA_HOST = os.getenv("TUYA_HOST") or "https://openapi.tuyaeu.com"  # EU; US: https://openapi.tuyaus.com
+TUYA_CLIENT_ID = os.getenv("TUYA_CLIENT_ID")
+TUYA_SECRET = os.getenv("TUYA_SECRET")
+TUYA_DEVICE_ID = os.getenv("TUYA_DEVICE_ID")
+TUYA_SWITCH_CODE = os.getenv("TUYA_SWITCH_CODE") or "switch_1"  # check the plug's instruction set
+FULL_SOC = 100
 
 # Delta 2 quota keys related to the battery
 BATTERY_QUOTAS = {
@@ -139,6 +158,70 @@ def get_quota(sn, quotas):
     return _check(requests.post(url, data=json.dumps(body), headers=_headers(body), timeout=15))
 
 
+# --- Tuya Cloud OpenAPI ---------------------------------------------------------
+# Signature (HMAC-SHA256, uppercase hex) over:
+#   client_id + [access_token] + t + nonce + stringToSign
+#   stringToSign = METHOD \n sha256(body) \n <signature headers, none here> \n path?sorted_query
+
+
+def _tuya_headers(method, path, body="", access_token=""):
+    t = str(int(time.time() * 1000))
+    nonce = uuid.uuid4().hex
+    content_sha = hashlib.sha256(body.encode()).hexdigest()
+    string_to_sign = "\n".join([method, content_sha, "", path])
+    msg = TUYA_CLIENT_ID + access_token + t + nonce + string_to_sign
+    sign = hmac.new(TUYA_SECRET.encode(), msg.encode(), hashlib.sha256).hexdigest().upper()
+    headers = {
+        "client_id": TUYA_CLIENT_ID,
+        "sign": sign,
+        "sign_method": "HMAC-SHA256",
+        "t": t,
+        "nonce": nonce,
+        "Content-Type": "application/json",
+    }
+    if access_token:
+        headers["access_token"] = access_token
+    return headers
+
+
+def _tuya_check(resp):
+    resp.raise_for_status()
+    body = resp.json()
+    if not body.get("success"):
+        raise RuntimeError(f"Tuya API error {body.get('code')}: {body.get('msg')}")
+    return body.get("result")
+
+
+def tuya_token():
+    path = "/v1.0/token?grant_type=1"
+    resp = requests.get(TUYA_HOST + path, headers=_tuya_headers("GET", path), timeout=15)
+    return _tuya_check(resp)["access_token"]
+
+
+def tuya_set_switch(device_id, on):
+    token = tuya_token()
+    path = f"/v1.0/iot-03/devices/{device_id}/commands"
+    body = json.dumps({"commands": [{"code": TUYA_SWITCH_CODE, "value": bool(on)}]})
+    resp = requests.post(TUYA_HOST + path, data=body,
+                         headers=_tuya_headers("POST", path, body, token), timeout=15)
+    return _tuya_check(resp)
+
+
+def control_plug(data, log):
+    """Switch the Tuya plug off when PD SoC is at 100%."""
+    soc = data.get("pd.soc")
+    if not isinstance(soc, (int, float)) or soc < FULL_SOC:
+        return
+    if not (TUYA_CLIENT_ID and TUYA_SECRET and TUYA_DEVICE_ID):
+        log(f"PD SoC is {soc:g}% but Tuya is not configured (TUYA_CLIENT_ID/TUYA_SECRET/TUYA_DEVICE_ID) — plug left as is.")
+        return
+    try:
+        tuya_set_switch(TUYA_DEVICE_ID, on=False)
+        log(f"PD SoC is {soc:g}% — smart plug {TUYA_DEVICE_ID} switched OFF.")
+    except Exception as e:  # noqa: BLE001 - plug failure must not hide battery status
+        log(f"PD SoC is {soc:g}% — failed to switch plug off: {e}")
+
+
 def main():
     sn = os.getenv("ECOFLOW_SN")
     devices = list_devices() or []
@@ -160,7 +243,10 @@ def main():
 
     if "--soc" in sys.argv:  # machine-friendly: just the number
         print(f"{pct:g}" if pct is not None else "n/a")
+        control_plug(data, lambda m: print(m, file=sys.stderr))  # keep stdout clean
         return
+
+    control_plug(data, lambda m: print(f"\n{m}"))
 
     if pct is None:
         print("\nBattery charge: n/a (none of the SoC keys returned — run with --all)")
