@@ -17,9 +17,9 @@ Setup:
     export TUYA_SWITCH_CODE=switch_1   # DP code of the relay (default switch_1)
 
 Usage:
-    python ecoflow_delta2_status.py          # battery summary
-    python ecoflow_delta2_status.py --all    # dump every quota key (to discover names)
-    python ecoflow_delta2_status.py --soc    # print only the charge level number (e.g. 87)
+    python ecoflow_delta2_status1.py          # battery summary
+    python ecoflow_delta2_status1.py --all    # dump every quota key (to discover names)
+    python ecoflow_delta2_status1.py --soc    # print only the charge level number (e.g. 87)
 """
 import hashlib
 import hmac
@@ -71,12 +71,21 @@ BATTERY_QUOTAS = {
 SOC_KEYS = ["bms_emsStatus.lcdShowSoc", "bms_bmsStatus.f32ShowSoc", "bms_bmsStatus.soc", "pd.soc"]
 
 
+def _as_number(val):
+    """Return val as float if it is numeric (or a numeric string), else None."""
+    if isinstance(val, bool):
+        return None
+    if isinstance(val, (int, float)) or (isinstance(val, str) and val.replace(".", "", 1).isdigit()):
+        return float(val)
+    return None
+
+
 def charge_level(data):
     """Return (percent, source_key) for the battery charge level, or (None, None)."""
     for key in SOC_KEYS:
-        val = data.get(key)
-        if isinstance(val, (int, float)) or (isinstance(val, str) and val.replace(".", "", 1).isdigit()):
-            return round(float(val), 1), key
+        val = _as_number(data.get(key))
+        if val is not None:
+            return round(val, 1), key
     return None, None
 
 
@@ -98,7 +107,7 @@ def extra_battery_socs(all_data):
 
 
 def charge_bar(pct, width=20):
-    filled = int(round(pct / 100 * width))
+    filled = int(pct / 100 * width)  # floor: only a truly full battery shows a full bar
     return "[" + "█" * filled + "░" * (width - filled) + "]"
 
 
@@ -204,13 +213,17 @@ def tuya_set_switch(device_id, on):
     body = json.dumps({"commands": [{"code": TUYA_SWITCH_CODE, "value": bool(on)}]})
     resp = requests.post(TUYA_HOST + path, data=body,
                          headers=_tuya_headers("POST", path, body, token), timeout=15)
-    return _tuya_check(resp)
+    if _tuya_check(resp) is not True:  # success=true but result=false: device rejected it
+        raise RuntimeError(f"device did not accept command {TUYA_SWITCH_CODE}={bool(on)}")
 
 
 def control_plug(data, log):
     """Switch the Tuya plug off when PD SoC is at 100%."""
-    soc = data.get("pd.soc")
-    if not isinstance(soc, (int, float)) or soc < FULL_SOC:
+    soc = _as_number(data.get("pd.soc"))
+    if soc is None:
+        log(f"PD SoC not reported (pd.soc={data.get('pd.soc')!r}) — plug control skipped.")
+        return
+    if soc < FULL_SOC:
         return
     if not (TUYA_CLIENT_ID and TUYA_SECRET and TUYA_DEVICE_ID):
         log(f"PD SoC is {soc:g}% but Tuya is not configured (TUYA_CLIENT_ID/TUYA_SECRET/TUYA_DEVICE_ID) — plug left as is.")
@@ -246,8 +259,6 @@ def main():
         control_plug(data, lambda m: print(m, file=sys.stderr))  # keep stdout clean
         return
 
-    control_plug(data, lambda m: print(f"\n{m}"))
-
     if pct is None:
         print("\nBattery charge: n/a (none of the SoC keys returned — run with --all)")
     else:
@@ -256,6 +267,8 @@ def main():
     for key, (label, unit) in BATTERY_QUOTAS.items():
         val = data.get(key, "n/a")
         print(f"  {label:<28} {val} {unit}".rstrip())
+
+    control_plug(data, lambda m: print(f"\n{m}"))
 
     # Extra / add-on batteries: discover any other SoC values the device reports.
     # This relies on the quota/all endpoint; if it fails (e.g. EcoFlow rejects the
